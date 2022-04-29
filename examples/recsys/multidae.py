@@ -6,9 +6,9 @@ from torch import nn, optim
 from torch.utils.data import DataLoader
 
 from catalyst import dl
-from catalyst.contrib import Normalize
 from catalyst.contrib.datasets import MovieLens
-from catalyst.utils import set_global_seed
+from catalyst.contrib.layers import Normalize
+from catalyst.utils.misc import set_global_seed
 
 
 def collate_fn_train(batch: List[torch.Tensor]) -> Dict[str, torch.Tensor]:
@@ -36,8 +36,12 @@ class MultiDAE(nn.Module):
         super().__init__()
         self.p_dims = p_dims
         if q_dims:
-            assert q_dims[0] == p_dims[-1], "In and Out dimensions must equal to each other"
-            assert q_dims[-1] == p_dims[0], "Latent dimension for p- and q- network mismatches."
+            assert (
+                q_dims[0] == p_dims[-1]
+            ), "In and Out dimensions must equal to each other"
+            assert (
+                q_dims[-1] == p_dims[0]
+            ), "Latent dimension for p- and q- network mismatches."
             self.q_dims = q_dims
         else:
             self.q_dims = p_dims[::-1]
@@ -54,7 +58,8 @@ class MultiDAE(nn.Module):
             self.decoder.add_module(f"decoder_fc_{i + 1}", nn.Linear(d_in, d_out))
             self.decoder.add_module(f"decoder_tanh_{i + 1}", nn.Tanh())
         self.decoder.add_module(
-            f"decoder_fc_{len(self.p_dims) - 1}", nn.Linear(self.p_dims[-2], self.p_dims[-1])
+            f"decoder_fc_{len(self.p_dims) - 1}",
+            nn.Linear(self.p_dims[-2], self.p_dims[-1]),
         )
 
         self.encoder.apply(self.init_weights)
@@ -84,12 +89,13 @@ if __name__ == "__main__":
     model = MultiDAE([200, 600, item_num], dropout=0.5)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
-    engine = dl.DeviceEngine()
+    engine = dl.Engine()
     callbacks = [
         dl.NDCGCallback("logits", "targets", [20, 50, 100]),
         dl.MAPCallback("logits", "targets", [20, 50, 100]),
         dl.MRRCallback("logits", "targets", [20, 50, 100]),
         dl.HitrateCallback("logits", "targets", [20, 50, 100]),
+        dl.BackwardCallback("loss"),
         dl.OptimizerCallback("loss", accumulation_steps=1),
     ]
 
@@ -106,5 +112,5 @@ if __name__ == "__main__":
         verbose=True,
         timeit=False,
         callbacks=callbacks,
-        logdir="./logs",
+        logdir="./logs_multidae",
     )

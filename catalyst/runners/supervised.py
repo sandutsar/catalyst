@@ -1,11 +1,27 @@
 from typing import Any, List, Mapping, Tuple, Union
+from collections import OrderedDict
 
 import torch
 
+from catalyst.callbacks.backward import BackwardCallback
+from catalyst.callbacks.criterion import CriterionCallback
+from catalyst.callbacks.optimizer import OptimizerCallback
+from catalyst.callbacks.scheduler import SchedulerCallback
+from catalyst.core.callback import (
+    Callback,
+    IBackwardCallback,
+    ICriterionCallback,
+    IOptimizerCallback,
+    ISchedulerCallback,
+)
+from catalyst.core.engine import Engine
+from catalyst.core.misc import callback_isinstance, sort_callbacks_by_order
 from catalyst.core.runner import IRunner
+from catalyst.runners.runner import Runner
+from catalyst.typing import RunnerModel, TorchCriterion, TorchOptimizer, TorchScheduler
 
 
-class ISupervisedRunner(IRunner):
+class ISupervisedRunner(Runner):
     """IRunner for experiments with supervised model.
 
     Args:
@@ -17,8 +33,6 @@ class ISupervisedRunner(IRunner):
     Abstraction, please check out implementations for more details:
 
         - :py:mod:`catalyst.runners.runner.SupervisedRunner`
-        - :py:mod:`catalyst.runners.config.SupervisedConfigRunner`
-        - :py:mod:`catalyst.runners.hydra.SupervisedHydraRunner`
 
     .. note::
         ISupervisedRunner contains only the logic with batch handling.
@@ -39,61 +53,8 @@ class ISupervisedRunner(IRunner):
     .. note::
         Please follow the `minimal examples`_ sections for use cases.
 
-        .. _`minimal examples`: https://github.com/catalyst-team/catalyst#minimal-examples
+        .. _`minimal examples`: https://github.com/catalyst-team/catalyst#minimal-examples  # noqa: E501, W505
 
-    Examples:
-
-    .. code-block:: python
-
-        import os
-        from torch import nn, optim
-        from torch.utils.data import DataLoader
-        from catalyst import dl, utils
-        from catalyst.data import ToTensor
-        from catalyst.contrib.datasets import MNIST
-
-        model = nn.Sequential(nn.Flatten(), nn.Linear(28 * 28, 10))
-        criterion = nn.CrossEntropyLoss()
-        optimizer = optim.Adam(model.parameters(), lr=0.02)
-
-        loaders = {
-            "train": DataLoader(
-                MNIST(os.getcwd(), train=True, download=True, transform=ToTensor()),
-                batch_size=32
-            ),
-            "valid": DataLoader(
-                MNIST(os.getcwd(), train=False),
-                batch_size=32
-            ),
-        }
-
-        runner = dl.SupervisedRunner(
-            input_key="features", output_key="logits", target_key="targets", loss_key="loss"
-        )
-        # model training
-        runner.train(
-            model=model,
-            criterion=criterion,
-            optimizer=optimizer,
-            loaders=loaders,
-            num_epochs=1,
-            callbacks=[
-                dl.AccuracyCallback(input_key="logits", target_key="targets", topk_args=(1, 3)),
-                dl.PrecisionRecallF1SupportCallback(
-                    input_key="logits", target_key="targets", num_classes=10
-                ),
-                dl.AUCCallback(input_key="logits", target_key="targets"),
-            ],
-            logdir="./logs",
-            valid_loader="valid",
-            valid_metric="loss",
-            minimize_valid_metric=True,
-            verbose=True,
-            load_best_on_end=True,
-        )
-        # model inference
-        for prediction in runner.predict_loader(loader=loaders["valid"]):
-            assert prediction["logits"].detach().cpu().numpy().shape[-1] == 10
     """
 
     def __init__(
@@ -191,7 +152,7 @@ class ISupervisedRunner(IRunner):
     def handle_batch(self, batch: Mapping[str, Any]) -> None:
         """
         Inner method to handle specified data batch.
-        Used to make a train/valid/infer stage during Experiment run.
+        Used to make a train/valid/infer step during Experiment run.
 
         Args:
             batch: dictionary with data batches from DataLoader.
@@ -199,4 +160,101 @@ class ISupervisedRunner(IRunner):
         self.batch = {**batch, **self.forward(batch)}
 
 
-__all__ = ["ISupervisedRunner"]
+class SupervisedRunner(ISupervisedRunner, Runner):
+    """Runner for experiments with supervised model.
+
+    Args:
+        model: Torch model instance
+        engine: Engine instance
+        input_key: key in ``runner.batch`` dict mapping for model input
+        output_key: key for ``runner.batch`` to store model output
+        target_key: key in ``runner.batch`` dict mapping for target
+        loss_key: key for ``runner.batch_metrics`` to store criterion loss output
+
+    SupervisedRunner logic pseudocode:
+
+    .. code-block:: python
+
+        batch = {"input_key": tensor, "target_key": tensor}
+        output = model(batch["input_key"])
+        batch["output_key"] = output
+        loss = criterion(batch["output_key"], batch["target_key"])
+        batch_metrics["loss_key"] = loss
+
+    .. note::
+        Please follow the `minimal examples`_ sections for use cases.
+
+        .. _`minimal examples`: https://github.com/catalyst-team/catalyst#minimal-examples  # noqa: E501, W505
+    """
+
+    def __init__(
+        self,
+        model: RunnerModel = None,
+        engine: Engine = None,
+        input_key: Any = "features",
+        output_key: Any = "logits",
+        target_key: str = "targets",
+        loss_key: str = "loss",
+    ):
+        """Init."""
+        ISupervisedRunner.__init__(
+            self,
+            input_key=input_key,
+            output_key=output_key,
+            target_key=target_key,
+            loss_key=loss_key,
+        )
+        Runner.__init__(self, model=model, engine=engine)
+
+    @torch.no_grad()
+    def predict_batch(self, batch: Mapping[str, Any], **kwargs) -> Mapping[str, Any]:
+        """
+        Run model inference on specified data batch.
+
+        .. warning::
+            You should not override this method.
+            If you need specific model call, override runner.forward() method.
+
+        Args:
+            batch: dictionary with data batch from DataLoader.
+            **kwargs: additional kwargs to pass to the model
+
+        Returns:
+            Mapping[str, Any]: model output dictionary
+        """
+        batch = self._process_batch(batch)
+        output = self.forward(batch, **kwargs)
+        return output
+
+    def get_callbacks(self) -> "OrderedDict[str, Callback]":
+        """Returns the callbacks for the experiment."""
+        callbacks = sort_callbacks_by_order(super().get_callbacks())
+        callback_exists = lambda callback_fn: any(
+            callback_isinstance(x, callback_fn) for x in callbacks.values()
+        )
+        if isinstance(self._criterion, TorchCriterion) and not callback_exists(
+            ICriterionCallback
+        ):
+            callbacks["_criterion"] = CriterionCallback(
+                input_key=self._output_key,
+                target_key=self._target_key,
+                metric_key=self._loss_key,
+            )
+        if isinstance(self._optimizer, TorchOptimizer) and not callback_exists(
+            IBackwardCallback
+        ):
+            callbacks["_backward"] = BackwardCallback(metric_key=self._loss_key)
+        if isinstance(self._optimizer, TorchOptimizer) and not callback_exists(
+            IOptimizerCallback
+        ):
+            callbacks["_optimizer"] = OptimizerCallback(metric_key=self._loss_key)
+        if isinstance(self._scheduler, TorchScheduler) and not callback_exists(
+            ISchedulerCallback
+        ):
+            callbacks["_scheduler"] = SchedulerCallback(
+                loader_key=self._valid_loader, metric_key=self._valid_metric
+            )
+        return callbacks
+
+
+__all__ = ["ISupervisedRunner", "SupervisedRunner"]

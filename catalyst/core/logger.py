@@ -1,6 +1,9 @@
-from typing import Dict
+from typing import Any, Dict, TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from catalyst.core.runner import IRunner
 
 
 class ILogger:
@@ -13,14 +16,23 @@ class ILogger:
     Abstraction, please check out implementations for more details:
 
         - :py:mod:`catalyst.loggers.console.ConsoleLogger`
-        - :py:mod:`catalyst.loggers.tensorboard.TensorboardLogger`
         - :py:mod:`catalyst.loggers.mlflow.MLflowLogger`
         - :py:mod:`catalyst.loggers.neptune.NeptuneLogger`
+        - :py:mod:`catalyst.loggers.tensorboard.TensorboardLogger`
     """
 
     def __init__(self, log_batch_metrics: bool, log_epoch_metrics: bool) -> None:
         self._log_batch_metrics = log_batch_metrics
         self._log_epoch_metrics = log_epoch_metrics
+
+    @property
+    def logger(self) -> Any:
+        """Internal logger/experiment/etc. from the monitoring system. # noqa: DAR401
+
+        Returns: # noqa: DAR201, DAR202
+            Any: internal logger/experiment/etc. from the monitoring system.
+        """
+        raise NotImplementedError()
 
     @property
     def log_batch_metrics(self) -> bool:
@@ -40,100 +52,45 @@ class ILogger:
         """
         return self._log_epoch_metrics
 
-    def log_metrics(
+    def log_artifact(
         self,
-        metrics: Dict[str, float],
+        tag: str,
+        runner: "IRunner",
+        artifact: object = None,
+        path_to_artifact: str = None,
         scope: str = None,
-        # experiment info
-        run_key: str = None,
-        global_epoch_step: int = 0,
-        global_batch_step: int = 0,
-        global_sample_step: int = 0,
-        # stage info
-        stage_key: str = None,
-        stage_epoch_len: int = 0,
-        stage_epoch_step: int = 0,
-        stage_batch_step: int = 0,
-        stage_sample_step: int = 0,
-        # loader info
-        loader_key: str = None,
-        loader_batch_len: int = 0,
-        loader_sample_len: int = 0,
-        loader_batch_step: int = 0,
-        loader_sample_step: int = 0,
     ) -> None:
-        """Logs metrics to the logger."""
+        """Logs artifact (arbitrary file like audio, video, etc) to the logger."""
         pass
 
     def log_image(
         self,
         tag: str,
         image: np.ndarray,
+        runner: "IRunner",
         scope: str = None,
-        # experiment info
-        run_key: str = None,
-        global_epoch_step: int = 0,
-        global_batch_step: int = 0,
-        global_sample_step: int = 0,
-        # stage info
-        stage_key: str = None,
-        stage_epoch_len: int = 0,
-        stage_epoch_step: int = 0,
-        stage_batch_step: int = 0,
-        stage_sample_step: int = 0,
-        # loader info
-        loader_key: str = None,
-        loader_batch_len: int = 0,
-        loader_sample_len: int = 0,
-        loader_batch_step: int = 0,
-        loader_sample_step: int = 0,
     ) -> None:
         """Logs image to the logger."""
         pass
 
-    def log_hparams(
-        self,
-        hparams: Dict,
-        scope: str = None,
-        # experiment info
-        run_key: str = None,
-        stage_key: str = None,
-    ) -> None:
+    def log_hparams(self, hparams: Dict, runner: "IRunner" = None) -> None:
         """Logs hyperparameters to the logger."""
         pass
 
-    def log_artifact(
+    def log_metrics(
         self,
-        tag: str,
-        artifact: object = None,
-        path_to_artifact: str = None,
-        scope: str = None,
-        # experiment info
-        run_key: str = None,
-        global_epoch_step: int = 0,
-        global_batch_step: int = 0,
-        global_sample_step: int = 0,
-        # stage info
-        stage_key: str = None,
-        stage_epoch_len: int = 0,
-        stage_epoch_step: int = 0,
-        stage_batch_step: int = 0,
-        stage_sample_step: int = 0,
-        # loader info
-        loader_key: str = None,
-        loader_batch_len: int = 0,
-        loader_sample_len: int = 0,
-        loader_batch_step: int = 0,
-        loader_sample_step: int = 0,
+        metrics: Dict[str, float],
+        scope: str,
+        runner: "IRunner",
     ) -> None:
-        """Logs artifact (arbitrary file like audio, video, model weights) to the logger."""
+        """Logs metrics to the logger."""
         pass
 
     def flush_log(self) -> None:
         """Flushes the logger."""
         pass
 
-    def close_log(self, scope: str = None) -> None:
+    def close_log(self) -> None:
         """Closes the logger."""
         pass
 

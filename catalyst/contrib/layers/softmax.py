@@ -29,7 +29,7 @@ class SoftMax(nn.Module):
         >>> target = torch.empty(3, dtype=torch.long).random_(10)
         >>> output = layer(embedding, target)
         >>> loss = loss_fn(output, target)
-        >>> loss.backward()
+        >>> self.engine.backward(loss)
 
     """
 
@@ -45,7 +45,12 @@ class SoftMax(nn.Module):
 
     def __repr__(self) -> str:
         """Object representation."""
-        rep = "SoftMax(" f"in_features={self.in_features}," f"out_features={self.out_features}" ")"
+        rep = (
+            "SoftMax("
+            f"in_features={self.in_features},"
+            f"out_features={self.out_features}"
+            ")"
+        )
         return rep
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:

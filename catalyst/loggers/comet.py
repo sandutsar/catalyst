@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, TYPE_CHECKING
 import pickle
 
 import numpy as np
@@ -8,6 +8,8 @@ from catalyst.settings import SETTINGS
 
 if SETTINGS.comet_required:
     import comet_ml
+if TYPE_CHECKING:
+    from catalyst.core.runner import IRunner
 
 
 class CometLogger(ILogger):
@@ -68,27 +70,6 @@ class CometLogger(ILogger):
             # ...
 
         runner = CustomRunner().run()
-
-    Config API example:
-
-    .. code-block:: yaml
-
-        loggers:
-            comet:
-                _target_: CometLogger
-                project_name: my_comet_project
-        ...
-
-    Hydra API example:
-
-    .. code-block:: yaml
-
-        loggers:
-            comet:
-                _target_: catalyst.dl.CometLogger
-                project_name: my_comet_project
-        ...
-
     """
 
     def __init__(
@@ -103,7 +84,9 @@ class CometLogger(ILogger):
         log_epoch_metrics: bool = SETTINGS.log_epoch_metrics,
         **experiment_kwargs: Dict,
     ) -> None:
-        super().__init__(log_batch_metrics=log_batch_metrics, log_epoch_metrics=log_epoch_metrics)
+        super().__init__(
+            log_batch_metrics=log_batch_metrics, log_epoch_metrics=log_epoch_metrics
+        )
         self.comet_mode = comet_mode
         self.workspace = workspace
         self.project_name = project_name
@@ -117,6 +100,11 @@ class CometLogger(ILogger):
         if tags is not None:
             self.experiment.add_tags(tags)
 
+    @property
+    def logger(self):
+        """Internal logger/experiment/etc. from the monitoring system."""
+        return self.experiment
+
     def _get_experiment(self, mode, experiment_id=None):
         if mode == "offline":
             if experiment_id is not None:
@@ -128,7 +116,9 @@ class CometLogger(ILogger):
                 )
 
             return comet_ml.OfflineExperiment(
-                workspace=self.workspace, project_name=self.project_name, **self.experiment_kwargs
+                workspace=self.workspace,
+                project_name=self.project_name,
+                **self.experiment_kwargs,
             )
 
         else:
@@ -141,113 +131,21 @@ class CometLogger(ILogger):
                 )
 
             return comet_ml.Experiment(
-                workspace=self.workspace, project_name=self.project_name, **self.experiment_kwargs
+                workspace=self.workspace,
+                project_name=self.project_name,
+                **self.experiment_kwargs,
             )
-
-    def log_metrics(
-        self,
-        metrics: Dict[str, float],
-        scope: str = None,
-        # experiment info
-        run_key: str = None,
-        global_epoch_step: int = 0,
-        global_batch_step: int = 0,
-        global_sample_step: int = 0,
-        # stage info
-        stage_key: str = None,
-        stage_epoch_len: int = 0,
-        stage_epoch_step: int = 0,
-        stage_batch_step: int = 0,
-        stage_sample_step: int = 0,
-        # loader info
-        loader_key: str = None,
-        loader_batch_len: int = 0,
-        loader_sample_len: int = 0,
-        loader_batch_step: int = 0,
-        loader_sample_step: int = 0,
-    ) -> None:
-        """Logs the metrics to the logger."""
-        if (scope == "batch" and not self.log_batch_metrics) or (
-            scope in ["loader", "epoch"] and not self.log_epoch_metrics
-        ):
-            return
-        if global_batch_step % self.logging_frequency == 0:
-            self.experiment.log_metrics(
-                metrics,
-                step=global_batch_step,
-                epoch=global_epoch_step,
-                prefix=f"{stage_key}/{loader_key}_{scope}",
-            )
-
-    def log_image(
-        self,
-        tag: str,
-        image: np.ndarray,
-        scope: str = None,
-        # experiment info
-        run_key: str = None,
-        global_epoch_step: int = 0,
-        global_batch_step: int = 0,
-        global_sample_step: int = 0,
-        # stage info
-        stage_key: str = None,
-        stage_epoch_len: int = 0,
-        stage_epoch_step: int = 0,
-        stage_batch_step: int = 0,
-        stage_sample_step: int = 0,
-        # loader info
-        loader_key: str = None,
-        loader_batch_len: int = 0,
-        loader_sample_len: int = 0,
-        loader_batch_step: int = 0,
-        loader_sample_step: int = 0,
-    ) -> None:
-        """Logs image to the logger."""
-        image_name = f"{scope}_{tag}"
-
-        self.experiment.log_image(image, name=image_name, step=global_batch_step)
-
-    def log_hparams(
-        self,
-        hparams: Dict,
-        scope: str = None,
-        # experiment info
-        run_key: str = None,
-        stage_key: str = None,
-    ) -> None:
-        """Logs hyperparameters to the logger."""
-        self.experiment.log_parameters(hparams, prefix=scope)
 
     def log_artifact(
         self,
-        tag: str = "artifact",
+        tag: str,
+        runner: "IRunner",
         artifact: object = None,
         path_to_artifact: str = None,
         scope: str = None,
-        # experiment info
-        run_key: str = None,
-        global_epoch_step: int = 0,
-        global_batch_step: int = 0,
-        global_sample_step: int = 0,
-        # stage info
-        stage_key: str = None,
-        stage_epoch_len: int = 0,
-        stage_epoch_step: int = 0,
-        stage_batch_step: int = 0,
-        stage_sample_step: int = 0,
-        # loader info
-        loader_key: str = None,
-        loader_batch_len: int = 0,
-        loader_sample_len: int = 0,
-        loader_batch_step: int = 0,
-        loader_sample_step: int = 0,
     ) -> None:
         """Logs artifact (any arbitrary file or object) to the logger."""
-        metadata_parameters = {
-            "stage_key": stage_key,
-            "loader_key": loader_key,
-            "scope": scope,
-        }
+        metadata_parameters = {"loader_key": runner.loader_key, "scope": scope}
         passed_metadata_parameters = {
             k: v for k, v in metadata_parameters.items() if v is not None
         }
@@ -255,26 +153,59 @@ class CometLogger(ILogger):
             self.experiment.log_asset(
                 path_to_artifact,
                 file_name=tag,
-                step=global_batch_step,
+                step=runner.batch_step,
                 metadata=passed_metadata_parameters,
             )
         else:
             self.experiment.log_asset_data(
                 pickle.dumps(artifact),
                 file_name=tag,
-                step=global_batch_step,
-                epoch=global_epoch_step,
+                step=runner.batch_step,
+                epoch=runner.epoch_step,
                 metadata=passed_metadata_parameters,
+            )
+
+    def log_image(
+        self,
+        tag: str,
+        image: np.ndarray,
+        runner: "IRunner",
+        scope: str = None,
+    ) -> None:
+        """Logs image to the logger."""
+        image_name = f"{scope}_{tag}" if scope is not None else tag
+        self.experiment.log_image(image, name=image_name, step=runner.batch_step)
+
+    def log_hparams(self, hparams: Dict, runner: "IRunner" = None) -> None:
+        """Logs hyperparameters to the logger."""
+        self.experiment.log_parameters(hparams)
+
+    def log_metrics(
+        self,
+        metrics: Dict[str, float],
+        scope: str,
+        runner: "IRunner",
+    ) -> None:
+        """Logs the metrics to the logger."""
+        if (scope == "batch" and not self.log_batch_metrics) or (
+            scope in ["loader", "epoch"] and not self.log_epoch_metrics
+        ):
+            return
+        if runner.batch_step % self.logging_frequency == 0:
+            self.experiment.log_metrics(
+                metrics,
+                step=runner.batch_step,
+                epoch=runner.epoch_step,
+                prefix=f"{runner.loader_key}_{scope}",
             )
 
     def flush_log(self) -> None:
         """Flushes the loggers."""
         pass
 
-    def close_log(self, scope: str = None) -> None:
+    def close_log(self) -> None:
         """Closes the logger."""
-        if scope is None or scope == "experiment":
-            self.experiment.end()
+        self.experiment.end()
 
 
 __all__ = ["CometLogger"]

@@ -2,16 +2,17 @@
 from typing import Iterator, Optional, Sequence, Tuple
 from collections import deque, namedtuple
 
+import gym
 import numpy as np
 
-import gym
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.utils.data.dataset import IterableDataset
 
-from catalyst import dl, metrics, utils
+from catalyst import dl, metrics
+from catalyst.contrib.utils.torch import get_optimal_inner_init, outer_init
 
 # On-policy common
 
@@ -81,7 +82,10 @@ def get_action(env, network: nn.Module, state: np.array) -> int:
 
 
 def generate_session(
-    env, network: nn.Module, t_max: int = 1000, rollout_buffer: Optional[RolloutBuffer] = None
+    env,
+    network: nn.Module,
+    t_max: int = 1000,
+    rollout_buffer: Optional[RolloutBuffer] = None,
 ) -> Tuple[float, int]:
     total_reward = 0
     states, actions, rewards = [], [], []
@@ -124,8 +128,8 @@ def generate_sessions(
 
 
 def get_network(env, num_hidden: int = 128):
-    inner_fn = utils.get_optimal_inner_init(nn.ReLU)
-    outer_fn = utils.outer_init
+    inner_fn = get_optimal_inner_init(nn.ReLU)
+    outer_fn = outer_init
 
     network = torch.nn.Sequential(
         nn.Linear(env.observation_space.shape[0], num_hidden),
@@ -196,7 +200,9 @@ class CustomRunner(dl.Runner):
 
     def on_loader_start(self, runner: dl.IRunner):
         super().on_loader_start(runner)
-        self.meters = {key: metrics.AdditiveMetric(compute_on_call=False) for key in ["loss"]}
+        self.meters = {
+            key: metrics.AdditiveMetric(compute_on_call=False) for key in ["loss"]
+        }
 
     def handle_batch(self, batch: Sequence[np.array]):
         # model train/valid step
@@ -211,7 +217,9 @@ class CustomRunner(dl.Runner):
         probas = F.softmax(logits, -1)
         logprobas = F.log_softmax(logits, -1)
         n_actions = probas.shape[1]
-        logprobas_for_actions = torch.sum(logprobas * to_one_hot(actions, n_dims=n_actions), dim=1)
+        logprobas_for_actions = torch.sum(
+            logprobas * to_one_hot(actions, n_dims=n_actions), dim=1
+        )
 
         J_hat = torch.mean(logprobas_for_actions * cumulative_returns)
         entropy_reg = -torch.mean(torch.sum(probas * logprobas, dim=1))
@@ -222,7 +230,7 @@ class CustomRunner(dl.Runner):
             self.meters[key].update(self.batch_metrics[key].item(), self.batch_size)
 
         if self.is_train_loader:
-            loss.backward()
+            self.engine.backward(loss)
             self.optimizer.step()
             self.optimizer.zero_grad()
 
@@ -248,11 +256,13 @@ if __name__ == "__main__":
 
     model = get_network(env)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    loaders = {"train_game": DataLoader(RolloutDataset(rollout_buffer), batch_size=batch_size)}
+    loaders = {
+        "train_game": DataLoader(RolloutDataset(rollout_buffer), batch_size=batch_size)
+    }
 
     runner = CustomRunner(gamma=gamma)
     runner.train(
-        engine=dl.DeviceEngine("cpu"),  # for simplicity reasons, let's run everything on cpu
+        engine=dl.CPUEngine(),  # for simplicity reasons, let's run everything on cpu
         model=model,
         optimizer=optimizer,
         loaders=loaders,
@@ -266,7 +276,9 @@ if __name__ == "__main__":
         callbacks=[GameCallback(env=env, rollout_buffer=rollout_buffer)],
     )
 
-    env = gym.wrappers.Monitor(gym.make(env_name), directory="videos_reinforce", force=True)
+    env = gym.wrappers.Monitor(
+        gym.make(env_name), directory="videos_reinforce", force=True
+    )
     generate_sessions(env=env, network=model, num_sessions=100)
     env.close()
 

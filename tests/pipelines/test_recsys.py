@@ -1,17 +1,31 @@
 # flake8: noqa
-
+import os
+from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from pytest import mark
 
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 from torch.utils.data import DataLoader, TensorDataset
 
-from catalyst import dl
+from catalyst import dl, utils
 from catalyst.settings import IS_CUDA_AVAILABLE, NUM_CUDA_DEVICES, SETTINGS
+from tests import (
+    IS_CONFIGS_REQUIRED,
+    IS_CPU_REQUIRED,
+    IS_DDP_AMP_REQUIRED,
+    IS_DDP_REQUIRED,
+    IS_DP_AMP_REQUIRED,
+    IS_DP_REQUIRED,
+    IS_GPU_AMP_REQUIRED,
+    IS_GPU_REQUIRED,
+)
+from tests.misc import run_experiment_from_configs
 
 
-def train_experiment(device, engine=None):
+def train_experiment(engine=None):
     with TemporaryDirectory() as logdir:
         # sample data
         num_users, num_features, num_items = int(1e4), int(1e1), 10
@@ -36,33 +50,32 @@ def train_experiment(device, engine=None):
                 transform=torch.sigmoid,
                 scope="on_batch_end",
             ),
-            dl.CriterionCallback(input_key="logits", target_key="targets", metric_key="loss"),
-            dl.AUCCallback(input_key="scores", target_key="targets"),
-            dl.HitrateCallback(input_key="scores", target_key="targets", topk_args=(1, 3, 5)),
-            dl.MRRCallback(input_key="scores", target_key="targets", topk_args=(1, 3, 5)),
-            dl.MAPCallback(input_key="scores", target_key="targets", topk_args=(1, 3, 5)),
-            dl.NDCGCallback(input_key="scores", target_key="targets", topk_args=(1, 3, 5)),
+            dl.CriterionCallback(
+                input_key="logits", target_key="targets", metric_key="loss"
+            ),
+            dl.HitrateCallback(input_key="scores", target_key="targets", topk=(1, 3, 5)),
+            dl.MRRCallback(input_key="scores", target_key="targets", topk=(1, 3, 5)),
+            dl.MAPCallback(input_key="scores", target_key="targets", topk=(1, 3, 5)),
+            dl.NDCGCallback(input_key="scores", target_key="targets", topk=(1, 3)),
+            dl.BackwardCallback(metric_key="loss"),
             dl.OptimizerCallback(metric_key="loss"),
             dl.SchedulerCallback(),
             dl.CheckpointCallback(
                 logdir=logdir, loader_key="valid", metric_key="map01", minimize=False
             ),
         ]
-        if SETTINGS.amp_required and (
-            engine is None
-            or not isinstance(
-                engine,
-                (dl.AMPEngine, dl.DataParallelAMPEngine, dl.DistributedDataParallelAMPEngine),
-            )
-        ):
+        if isinstance(engine, dl.CPUEngine):
             callbacks.append(dl.AUCCallback(input_key="logits", target_key="targets"))
 
         # model training
         runner = dl.SupervisedRunner(
-            input_key="features", output_key="logits", target_key="targets", loss_key="loss"
+            input_key="features",
+            output_key="logits",
+            target_key="targets",
+            loss_key="loss",
         )
         runner.train(
-            engine=engine or dl.DeviceEngine(device),
+            engine=engine,
             model=model,
             criterion=criterion,
             optimizer=optimizer,
@@ -74,70 +87,218 @@ def train_experiment(device, engine=None):
         )
 
 
-# Torch
-def test_on_cpu():
-    train_experiment("cpu")
+def train_experiment_from_configs(*auxiliary_configs: str):
+    configs_dir = Path(__file__).parent / "configs"
+    main_config = f"{Path(__file__).stem}.yml"
+
+    d = utils.load_config(str(configs_dir / main_config), ordered=True)["shared"]
+    X = torch.rand(d["num_users"], d["num_features"])
+    y = (torch.rand(d["num_users"], d["num_items"]) > 0.5).to(torch.float32)
+    torch.save(X, Path("tests") / "X.pt")
+    torch.save(y, Path("tests") / "y.pt")
+
+    run_experiment_from_configs(configs_dir, main_config, *auxiliary_configs)
 
 
-@mark.skipif(not IS_CUDA_AVAILABLE, reason="CUDA device is not available")
-def test_on_torch_cuda0():
-    train_experiment("cuda:0")
-
-
-@mark.skipif(not (IS_CUDA_AVAILABLE and NUM_CUDA_DEVICES >= 2), reason="No CUDA>=2 found")
-def test_on_torch_cuda1():
-    train_experiment("cuda:1")
-
-
-@mark.skipif(not (IS_CUDA_AVAILABLE and NUM_CUDA_DEVICES >= 2), reason="No CUDA>=2 found")
-def test_on_torch_dp():
-    train_experiment(None, dl.DataParallelEngine())
-
-
-@mark.skipif(not (IS_CUDA_AVAILABLE and NUM_CUDA_DEVICES >= 2), reason="No CUDA>=2 found")
-def test_on_torch_ddp():
-    train_experiment(None, dl.DistributedDataParallelEngine())
-
-
-# AMP
-@mark.skipif(not (IS_CUDA_AVAILABLE and SETTINGS.amp_required), reason="No CUDA or AMP found")
-def test_on_amp():
-    train_experiment(None, dl.AMPEngine())
+# Device
+@mark.skipif(not IS_CPU_REQUIRED, reason="CUDA device is not available")
+def test_run_on_cpu():
+    train_experiment(dl.CPUEngine())
 
 
 @mark.skipif(
-    not (IS_CUDA_AVAILABLE and NUM_CUDA_DEVICES >= 2 and SETTINGS.amp_required),
+    not IS_CONFIGS_REQUIRED or not IS_CPU_REQUIRED, reason="CPU device is not available"
+)
+def test_config_run_on_cpu():
+    train_experiment_from_configs("engine_cpu.yml")
+
+
+@mark.skipif(
+    not all([IS_GPU_REQUIRED, IS_CUDA_AVAILABLE]), reason="CUDA device is not available"
+)
+def test_run_on_torch_cuda0():
+    train_experiment(dl.GPUEngine())
+
+
+@mark.skipif(
+    not IS_CONFIGS_REQUIRED or not all([IS_GPU_REQUIRED, IS_CUDA_AVAILABLE]),
+    reason="CUDA device is not available",
+)
+def test_config_run_on_torch_cuda0():
+    train_experiment_from_configs("engine_gpu.yml")
+
+
+@mark.skipif(
+    not all([IS_GPU_AMP_REQUIRED, IS_CUDA_AVAILABLE, SETTINGS.amp_required]),
+    reason="No CUDA or AMP found",
+)
+def test_run_on_amp():
+    train_experiment(dl.GPUEngine(fp16=True))
+
+
+@mark.skipif(
+    not IS_CONFIGS_REQUIRED
+    or not all([IS_GPU_AMP_REQUIRED, IS_CUDA_AVAILABLE, SETTINGS.amp_required]),
+    reason="No CUDA or AMP found",
+)
+def test_config_run_on_amp():
+    train_experiment_from_configs("engine_gpu_amp.yml")
+
+
+# DP
+@mark.skipif(
+    not all([IS_DP_REQUIRED, IS_CUDA_AVAILABLE, NUM_CUDA_DEVICES >= 2]),
+    reason="No CUDA>=2 found",
+)
+def test_run_on_torch_dp():
+    train_experiment(dl.DataParallelEngine())
+
+
+@mark.skipif(
+    not IS_CONFIGS_REQUIRED
+    or not all([IS_DP_REQUIRED, IS_CUDA_AVAILABLE, NUM_CUDA_DEVICES >= 2]),
+    reason="No CUDA>=2 found",
+)
+def test_config_run_on_torch_dp():
+    train_experiment_from_configs("engine_dp.yml")
+
+
+@mark.skipif(
+    not all(
+        [
+            IS_DP_AMP_REQUIRED,
+            IS_CUDA_AVAILABLE,
+            NUM_CUDA_DEVICES >= 2,
+            SETTINGS.amp_required,
+        ]
+    ),
     reason="No CUDA>=2 or AMP found",
 )
-def test_on_amp_dp():
-    train_experiment(None, dl.DataParallelAMPEngine())
+def test_run_on_amp_dp():
+    train_experiment(dl.DataParallelEngine(fp16=True))
 
 
 @mark.skipif(
-    not (IS_CUDA_AVAILABLE and NUM_CUDA_DEVICES >= 2 and SETTINGS.amp_required),
+    not IS_CONFIGS_REQUIRED
+    or not all(
+        [
+            IS_DP_AMP_REQUIRED,
+            IS_CUDA_AVAILABLE,
+            NUM_CUDA_DEVICES >= 2,
+            SETTINGS.amp_required,
+        ]
+    ),
     reason="No CUDA>=2 or AMP found",
 )
-def test_on_amp_ddp():
-    train_experiment(None, dl.DistributedDataParallelAMPEngine())
+def test_config_run_on_amp_dp():
+    train_experiment_from_configs("engine_dp_amp.yml")
 
 
-# APEX
-@mark.skipif(not (IS_CUDA_AVAILABLE and SETTINGS.apex_required), reason="No CUDA or Apex found")
-def test_on_apex():
-    train_experiment(None, dl.APEXEngine())
+# DDP
+@mark.skipif(
+    not all([IS_DDP_REQUIRED, IS_CUDA_AVAILABLE, NUM_CUDA_DEVICES >= 2]),
+    reason="No CUDA>=2 found",
+)
+def test_run_on_torch_ddp():
+    train_experiment(dl.DistributedDataParallelEngine())
 
 
 @mark.skipif(
-    not (IS_CUDA_AVAILABLE and NUM_CUDA_DEVICES >= 2 and SETTINGS.apex_required),
-    reason="No CUDA>=2 or Apex found",
+    not IS_CONFIGS_REQUIRED
+    or not all([IS_DDP_REQUIRED, IS_CUDA_AVAILABLE, NUM_CUDA_DEVICES >= 2]),
+    reason="No CUDA>=2 found",
 )
-def test_on_apex_dp():
-    train_experiment(None, dl.DataParallelAPEXEngine())
+def test_config_run_on_torch_ddp():
+    train_experiment_from_configs("engine_ddp.yml")
 
 
 @mark.skipif(
-    not (IS_CUDA_AVAILABLE and NUM_CUDA_DEVICES >= 2 and SETTINGS.apex_required),
-    reason="No CUDA>=2 or Apex found",
+    not all(
+        [
+            IS_DDP_AMP_REQUIRED,
+            IS_CUDA_AVAILABLE,
+            NUM_CUDA_DEVICES >= 2,
+            SETTINGS.amp_required,
+        ]
+    ),
+    reason="No CUDA>=2 or AMP found",
 )
-def test_on_apex_ddp():
-    train_experiment(None, dl.DistributedDataParallelAPEXEngine())
+def test_run_on_amp_ddp():
+    train_experiment(dl.DistributedDataParallelEngine(fp16=True))
+
+
+@mark.skipif(
+    not IS_CONFIGS_REQUIRED
+    or not all(
+        [
+            IS_DDP_AMP_REQUIRED,
+            IS_CUDA_AVAILABLE,
+            NUM_CUDA_DEVICES >= 2,
+            SETTINGS.amp_required,
+        ]
+    ),
+    reason="No CUDA>=2 or AMP found",
+)
+def test_config_run_on_amp_ddp():
+    train_experiment_from_configs("engine_ddp_amp.yml")
+
+
+def _train_fn(local_rank, world_size):
+    process_group_kwargs = {
+        "backend": "nccl",
+        "world_size": world_size,
+    }
+    os.environ["WORLD_SIZE"] = str(world_size)
+    os.environ["RANK"] = str(local_rank)
+    os.environ["LOCAL_RANK"] = str(local_rank)
+    dist.init_process_group(**process_group_kwargs)
+    train_experiment(dl.Engine())
+    dist.destroy_process_group()
+
+
+@mark.skipif(
+    not all([IS_DDP_REQUIRED, IS_CUDA_AVAILABLE, NUM_CUDA_DEVICES >= 2]),
+    reason="No CUDA>=2 found",
+)
+def test_run_on_torch_ddp_spawn():
+    world_size: int = torch.cuda.device_count()
+    mp.spawn(
+        _train_fn,
+        args=(world_size,),
+        nprocs=world_size,
+        join=True,
+    )
+
+
+def _train_fn_amp(local_rank, world_size):
+    process_group_kwargs = {
+        "backend": "nccl",
+        "world_size": world_size,
+    }
+    os.environ["WORLD_SIZE"] = str(world_size)
+    os.environ["RANK"] = str(local_rank)
+    os.environ["LOCAL_RANK"] = str(local_rank)
+    dist.init_process_group(**process_group_kwargs)
+    train_experiment(dl.Engine(fp16=True))
+    dist.destroy_process_group()
+
+
+@mark.skipif(
+    not all(
+        [
+            IS_DDP_AMP_REQUIRED,
+            IS_CUDA_AVAILABLE,
+            NUM_CUDA_DEVICES >= 2,
+            SETTINGS.amp_required,
+        ]
+    ),
+    reason="No CUDA>=2 or AMP found",
+)
+def test_run_on_torch_ddp_amp_spawn():
+    world_size: int = torch.cuda.device_count()
+    mp.spawn(
+        _train_fn_amp,
+        args=(world_size,),
+        nprocs=world_size,
+        join=True,
+    )

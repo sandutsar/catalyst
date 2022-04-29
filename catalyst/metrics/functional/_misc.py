@@ -1,13 +1,10 @@
 from typing import Optional, Sequence, Tuple
-import logging
 
 import numpy as np
 
 import torch
 from torch import Tensor
 from torch.nn import functional as F
-
-logger = logging.getLogger(__name__)
 
 
 def process_multiclass_components(
@@ -40,13 +37,16 @@ def process_multiclass_components(
     if outputs.dim() == targets.dim() + 1:
         # looks like we have scores/probabilities in our outputs
         # let's convert them to final model predictions
-        num_classes = max(outputs.shape[argmax_dim], int(targets.max().detach().item() + 1))
+        num_classes = max(
+            outputs.shape[argmax_dim], int(targets.max().detach().item() + 1)
+        )
         outputs = torch.argmax(outputs, dim=argmax_dim)
     if num_classes is None:
         # as far as we expect the outputs/targets tensors to be int64
         # we could find number of classes as max available number
         num_classes = max(
-            int(outputs.max().detach().item() + 1), int(targets.max().detach().item() + 1)
+            int(outputs.max().detach().item() + 1),
+            int(targets.max().detach().item() + 1),
         )
 
     if outputs.dim() == 1:
@@ -74,7 +74,9 @@ def process_multiclass_components(
     return outputs, targets, num_classes
 
 
-def process_recsys_components(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+def process_recsys_components(
+    outputs: torch.Tensor, targets: torch.Tensor
+) -> torch.Tensor:
     """
     General pre-processing for calculation recsys metrics
 
@@ -102,7 +104,7 @@ def process_recsys_components(outputs: torch.Tensor, targets: torch.Tensor) -> t
 
 def process_multilabel_components(
     outputs: torch.Tensor, targets: torch.Tensor, weights: Optional[torch.Tensor] = None
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
     """General preprocessing for multilabel-based metrics.
 
     Args:
@@ -142,11 +144,13 @@ def process_multilabel_components(
             targets = F.one_hot(targets, num_classes).float()
         else:
             # binary case
+            num_classes = 2
             targets = targets.view(-1, 1)
     else:
         assert targets.dim() == 2, (
             "wrong `targets` size " "(should be 1D or 2D with one column per class)"
         )
+        num_classes = outputs.shape[-1]
 
     if weights is not None:
         assert weights.dim() == 1, "Weights dimension should be 1"
@@ -157,7 +161,7 @@ def process_multilabel_components(
 
     assert torch.equal(targets ** 2, targets), "targets should be binary (0 or 1)"
 
-    return outputs, targets, weights
+    return outputs, targets, weights, num_classes
 
 
 def get_binary_statistics(
@@ -199,8 +203,11 @@ def get_binary_statistics(
 
 
 def get_multiclass_statistics(
-    outputs: Tensor, targets: Tensor, argmax_dim: int = -1, num_classes: Optional[int] = None
-) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    outputs: Tensor,
+    targets: Tensor,
+    argmax_dim: int = -1,
+    num_classes: Optional[int] = None,
+) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, int]:
     """
     Computes the number of true negative, false positive,
     false negative, true positive and support
@@ -254,12 +261,12 @@ def get_multiclass_statistics(
             support[class_index],
         ) = get_binary_statistics(outputs=outputs, targets=targets, label=class_index)
 
-    return tn, fp, fn, tp, support
+    return tn, fp, fn, tp, support, num_classes
 
 
 def get_multilabel_statistics(
     outputs: Tensor, targets: Tensor
-) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, int]:
     """
     Computes the number of true negative, false positive,
     false negative, true positive and support
@@ -322,7 +329,9 @@ def get_multilabel_statistics(
         # )
 
     """
-    outputs, targets, _ = process_multilabel_components(outputs=outputs, targets=targets)
+    outputs, targets, _, num_classes = process_multilabel_components(
+        outputs=outputs, targets=targets
+    )
     assert outputs.shape == targets.shape
     num_classes = outputs.shape[-1]
 
@@ -343,10 +352,10 @@ def get_multilabel_statistics(
             support[class_index],
         ) = get_binary_statistics(outputs=class_outputs, targets=class_targets, label=1)
 
-    return tn, fp, fn, tp, support
+    return tn, fp, fn, tp, support, num_classes
 
 
-def get_default_topk_args(num_classes: int) -> Sequence[int]:
+def get_default_topk(num_classes: int) -> Sequence[int]:
     """Calculate list params for ``Accuracy@k``.
 
     Args:
@@ -356,10 +365,10 @@ def get_default_topk_args(num_classes: int) -> Sequence[int]:
         iterable: array of accuracy arguments
 
     Examples:
-        >>> get_default_topk_args(num_classes=4)
+        >>> get_default_topk(num_classes=4)
         [1, 3]
 
-        >>> get_default_topk_args(num_classes=8)
+        >>> get_default_topk(num_classes=8)
         [1, 3, 5]
     """
     result = [1]
@@ -400,5 +409,5 @@ __all__ = [
     "get_binary_statistics",
     "get_multiclass_statistics",
     "get_multilabel_statistics",
-    "get_default_topk_args",
+    "get_default_topk",
 ]

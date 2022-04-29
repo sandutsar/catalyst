@@ -4,16 +4,18 @@ import os
 
 from buffer import OffpolicyReplayBuffer
 from db import RedisDB
+import gym
 from misc import GameCallback, soft_update, Trajectory
 import numpy as np
 from sampler import ISampler
 
-import gym
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from catalyst import dl, metrics, utils
+from catalyst import dl, metrics
+from catalyst.contrib.utils.torch import get_optimal_inner_init, outer_init
+from catalyst.utils.torch import set_requires_grad
 
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
@@ -84,11 +86,14 @@ class Sampler(ISampler):
 
 
 def get_network_actor(env):
-    inner_fn = utils.get_optimal_inner_init(nn.ReLU)
-    outer_fn = utils.outer_init
+    inner_fn = get_optimal_inner_init(nn.ReLU)
+    outer_fn = outer_init
 
     network = torch.nn.Sequential(
-        nn.Linear(env.observation_space.shape[0], 400), nn.ReLU(), nn.Linear(400, 300), nn.ReLU()
+        nn.Linear(env.observation_space.shape[0], 400),
+        nn.ReLU(),
+        nn.Linear(400, 300),
+        nn.ReLU(),
     )
     head = torch.nn.Sequential(nn.Linear(300, 1), nn.Tanh())
 
@@ -99,8 +104,8 @@ def get_network_actor(env):
 
 
 def get_network_critic(env):
-    inner_fn = utils.get_optimal_inner_init(nn.LeakyReLU)
-    outer_fn = utils.outer_init
+    inner_fn = get_optimal_inner_init(nn.LeakyReLU)
+    outer_fn = outer_init
 
     network = torch.nn.Sequential(
         nn.Linear(env.observation_space.shape[0] + 1, 400),
@@ -151,8 +156,8 @@ class CustomRunner(dl.Runner):
         self.actor_optimizer: nn.Module = None
         self.critic_optimizer: nn.Module = None
 
-    def on_stage_start(self, runner: dl.IRunner):
-        super().on_stage_start(runner)
+    def on_experiment_start(self, runner: dl.IRunner):
+        super().on_experiment_start(runner)
         self.actor = self.model[self.actor_key]
         self.critic = self.model[self.critic_key]
         self.target_actor = self.model[self.target_actor_key]
@@ -211,15 +216,15 @@ class CustomRunner(dl.Runner):
         if self.is_train_loader:
             self.actor.zero_grad()
             self.actor_optimizer.zero_grad()
-            policy_loss.backward()
+            policy_self.engine.backward(loss)
             self.actor_optimizer.step()
 
             self.critic.zero_grad()
             self.critic_optimizer.zero_grad()
-            value_loss.backward()
+            value_self.engine.backward(loss)
             self.critic_optimizer.step()
 
-            if self.global_batch_step % self.tau_period == 0:
+            if self.batch_step % self.tau_period == 0:
                 soft_update(self.target_actor, self.actor, self.tau)
                 soft_update(self.target_critic, self.critic, self.tau)
 
@@ -262,15 +267,17 @@ if __name__ == "__main__":
 
     actor, target_actor = get_network_actor(env), get_network_actor(env)
     critic, target_critic = get_network_critic(env), get_network_critic(env)
-    utils.set_requires_grad(target_actor, requires_grad=False)
-    utils.set_requires_grad(target_critic, requires_grad=False)
+    set_requires_grad(target_actor, requires_grad=False)
+    set_requires_grad(target_critic, requires_grad=False)
 
-    models = {
-        "actor": actor,
-        "critic": critic,
-        "target_actor": target_actor,
-        "target_critic": target_critic,
-    }
+    models = nn.ModuleDict(
+        {
+            "actor": actor,
+            "critic": critic,
+            "target_actor": target_actor,
+            "target_critic": target_critic,
+        }
+    )
 
     criterion = torch.nn.MSELoss()
     optimizer = {
@@ -284,7 +291,7 @@ if __name__ == "__main__":
 
     runner.train(
         # for simplicity reasons, let's run everything on single gpu
-        engine=dl.DeviceEngine("cuda"),
+        engine=dl.GPUEngine(),
         model=models,
         criterion=criterion,
         optimizer=optimizer,

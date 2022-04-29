@@ -13,7 +13,7 @@ Suppose you have the following classification pipeline:
     from torch.nn import functional as F
     from torch.utils.data import DataLoader
     from catalyst import dl, metrics, utils
-    from catalyst.data import ToTensor
+
     from catalyst.contrib.datasets import MNIST
 
     model = nn.Sequential(nn.Flatten(), nn.Linear(28 * 28, 10))
@@ -22,7 +22,7 @@ Suppose you have the following classification pipeline:
 
     loaders = {
         "train": DataLoader(
-            MNIST(os.getcwd(), train=True, download=True, transform=ToTensor()), batch_size=32
+            MNIST(os.getcwd(), train=True, download=True), batch_size=32
         ),
         "valid": DataLoader(
             MNIST(os.getcwd(), train=False), batch_size=32
@@ -62,7 +62,7 @@ Suppose you have the following classification pipeline:
                 self.meters[key].update(self.batch_metrics[key].item(), self.batch_size)
             # run model backward pass
             if self.is_train_loader:
-                loss.backward()
+                self.engine.backward(loss)
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 

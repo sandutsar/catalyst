@@ -112,6 +112,8 @@ ENV/
 *.csv
 *.tsv
 *.ipynb
+*.pt
+*.pth
 
 tmp/
 logs/
@@ -138,3 +140,5 @@ _nogit*
 
 presets/
 _todo/
+tests/MNIST/
+codestyle.txt

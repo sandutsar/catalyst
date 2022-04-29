@@ -13,4 +13,4 @@ from catalyst.data.sampler import (
     MiniEpochSampler,
 )
 
-from catalyst.contrib.data import *
+# from catalyst.contrib.data import *

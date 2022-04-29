@@ -1,6 +1,6 @@
 Quickstart 101
 ==============================================================================
-**In this quickstart, we’ll show you how to organize your PyTorch code with Catalyst.**
+**In this quickstart, we'll show you how to organize your PyTorch code with Catalyst.**
 
 Catalyst goals
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -28,8 +28,7 @@ Step 2 - Make python imports
     import os
     from torch import nn, optim
     from torch.utils.data import DataLoader
-    from catalyst import dl
-    from catalyst.data import ToTensor
+    from catalyst import dl, utils
     from catalyst.contrib.datasets import MNIST
 
 Step 3 - Write PyTorch code
@@ -43,12 +42,8 @@ Let's define **what** we would like to run:
     optimizer = optim.Adam(model.parameters(), lr=0.02)
 
     loaders = {
-        "train": DataLoader(
-            MNIST(os.getcwd(), train=True, download=True, transform=ToTensor()), batch_size=32
-        ),
-        "valid": DataLoader(
-            MNIST(os.getcwd(), train=False), batch_size=32
-        ),
+        "train": DataLoader(MNIST(os.getcwd(), train=True), batch_size=32),
+        "valid": DataLoader(MNIST(os.getcwd(), train=False), batch_size=32),
     }
 
 Step 4 - Accelerate it with Catalyst
@@ -61,7 +56,7 @@ Let's define **how** we would like to handle the data (in pure PyTorch):
 
         def predict_batch(self, batch):
             # model inference step
-            return self.model(batch[0].to(self.device))
+            return self.model(batch[0].to(self.engine.device))
 
         def handle_batch(self, batch):
             # model train/valid step
@@ -78,6 +73,7 @@ Let's **train** and **evaluate** your model (`supported metrics`_) with a few li
 .. code-block:: python
 
     runner = CustomRunner()
+
     # model training
     runner.train(
         model=model,
@@ -87,23 +83,30 @@ Let's **train** and **evaluate** your model (`supported metrics`_) with a few li
         logdir="./logs",
         num_epochs=5,
         verbose=True,
-        load_best_on_end=True,
         callbacks=[
-            dl.AccuracyCallback(input_key="logits", target_key="targets", num_classes=10),
+            dl.AccuracyCallback(input_key="logits", target_key="targets", topk=(1, 3)),
             dl.PrecisionRecallF1SupportCallback(
                 input_key="logits", target_key="targets", num_classes=10
             ),
             dl.CriterionCallback(input_key="logits", target_key="targets", metric_key="loss"),
+            dl.BackwardCallback(metric_key="loss"),
             dl.OptimizerCallback(metric_key="loss"),
             dl.CheckpointCallback(
-                "./logs", loader_key="valid", metric_key="loss", minimize=True, save_n_best=3
+                "./logs", loader_key="valid", metric_key="loss", minimize=True, topk=3
             ),
         ]
     )
 
+    # model evaluation
+    metrics = runner.evaluate_loader(
+        loader=loaders["valid"],
+        callbacks=[dl.AccuracyCallback(input_key="logits", target_key="targets", topk=(1, 3, 5))],
+    )
+
 Step 6 - Make predictions
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-You could easily use your custom logic for model inference on batch or loader thanks to ``runner.predict_batch`` method.
+You could easily use your custom logic for model inference on batch
+or loader thanks to ``runner.predict_batch`` and ``runner.predict_loader`` methods.
 
 .. code-block:: python
 
@@ -120,18 +123,13 @@ Finally, you could use a large number of model post-processing utils for product
 
 .. code-block:: python
 
-    features_batch = next(iter(loaders["valid"]))[0]
-    # model stochastic weight averaging
-    model.load_state_dict(
-        utils.get_averaged_weights_by_path_mask(logdir="./logs", path_mask="*.pth")
-    )
+    model = runner.model.cpu()
+    batch = next(iter(loaders["valid"]))[0]
     # model tracing
-    utils.trace_model(model=runner.model, batch=features_batch)
+    utils.trace_model(model=model, batch=batch)
     # model quantization
-    utils.quantize_model(model=runner.model)
+    utils.quantize_model(model=model)
     # model pruning
-    utils.prune_model(model=runner.model, pruning_fn="l1_unstructured", amount=0.8)
+    utils.prune_model(model=model, pruning_fn="l1_unstructured", amount=0.8)
     # onnx export
-    utils.onnx_export(
-        model=runner.model, batch=features_batch, file="./logs/mnist.onnx", verbose=True
-    )
+    utils.onnx_export(model=model, batch=batch, file="./logs/mnist.onnx", verbose=True)

@@ -2,15 +2,17 @@
 from typing import Iterator, Optional, Sequence, Tuple
 from collections import deque, namedtuple
 
+import gym
 import numpy as np
 
-import gym
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.utils.data.dataset import IterableDataset
 
-from catalyst import dl, metrics, utils
+from catalyst import dl, metrics
+from catalyst.contrib.utils.torch import get_optimal_inner_init, outer_init
+from catalyst.utils.torch import set_requires_grad
 
 # Off-policy common
 
@@ -27,8 +29,12 @@ class ReplayBuffer:
         self.buffer.append(transition)
 
     def sample(self, size: int) -> Sequence[np.array]:
-        indices = np.random.choice(len(self.buffer), size, replace=size > len(self.buffer))
-        states, actions, rewards, dones, next_states = zip(*[self.buffer[idx] for idx in indices])
+        indices = np.random.choice(
+            len(self.buffer), size, replace=size > len(self.buffer)
+        )
+        states, actions, rewards, dones, next_states = zip(
+            *[self.buffer[idx] for idx in indices]
+        )
         states = np.array(states, dtype=np.float32)
         actions = np.array(actions, dtype=np.int64)
         rewards = np.array(rewards, dtype=np.float32)
@@ -48,7 +54,9 @@ class ReplayDataset(IterableDataset):
         self.epoch_size = epoch_size
 
     def __iter__(self) -> Iterator[Sequence[np.array]]:
-        states, actions, rewards, dones, next_states = self.buffer.sample(self.epoch_size)
+        states, actions, rewards, dones, next_states = self.buffer.sample(
+            self.epoch_size
+        )
         for i in range(len(dones)):
             yield states[i], actions[i], rewards[i], dones[i], next_states[i]
 
@@ -113,7 +121,11 @@ def generate_sessions(
     sessions_reward, sessions_steps = 0, 0
     for i_episone in range(num_sessions):
         r, t = generate_session(
-            env=env, network=network, t_max=t_max, epsilon=epsilon, replay_buffer=replay_buffer
+            env=env,
+            network=network,
+            t_max=t_max,
+            epsilon=epsilon,
+            replay_buffer=replay_buffer,
         )
         sessions_reward += r
         sessions_steps += t
@@ -121,8 +133,8 @@ def generate_sessions(
 
 
 def get_network(env, num_hidden: int = 128):
-    inner_fn = utils.get_optimal_inner_init(nn.ReLU)
-    outer_fn = utils.outer_init
+    inner_fn = get_optimal_inner_init(nn.ReLU)
+    outer_fn = outer_init
 
     network = torch.nn.Sequential(
         nn.Linear(env.observation_space.shape[0], num_hidden),
@@ -167,7 +179,7 @@ class GameCallback(dl.Callback):
         self.session_counter = 0
         self.session_steps = 0
 
-    def on_stage_start(self, runner: dl.IRunner) -> None:
+    def on_experiment_start(self, runner: dl.IRunner) -> None:
         self.actor = runner.model[self.actor_key]
 
         self.actor.eval()
@@ -186,7 +198,7 @@ class GameCallback(dl.Callback):
         self.session_steps = 0
 
     def on_batch_end(self, runner: dl.IRunner):
-        if runner.global_batch_step % self.session_period == 0:
+        if runner.batch_step % self.session_period == 0:
             self.actor.eval()
 
             session_reward, session_steps = generate_session(
@@ -243,15 +255,17 @@ class CustomRunner(dl.Runner):
         self.origin_network: nn.Module = None
         self.target_network: nn.Module = None
 
-    def on_stage_start(self, runner: dl.IRunner):
-        super().on_stage_start(runner)
+    def on_experiment_start(self, runner: dl.IRunner):
+        super().on_experiment_start(runner)
         self.origin_network = self.model[self.origin_key]
         self.target_network = self.model[self.target_key]
         soft_update(self.target_network, self.origin_network, 1.0)
 
     def on_loader_start(self, runner: dl.IRunner):
         super().on_loader_start(runner)
-        self.meters = {key: metrics.AdditiveMetric(compute_on_call=False) for key in ["loss"]}
+        self.meters = {
+            key: metrics.AdditiveMetric(compute_on_call=False) for key in ["loss"]
+        }
 
     def handle_batch(self, batch: Sequence[np.array]):
         # model train/valid step
@@ -283,11 +297,11 @@ class CustomRunner(dl.Runner):
             self.meters[key].update(self.batch_metrics[key].item(), self.batch_size)
 
         if self.is_train_loader:
-            loss.backward()
+            self.engine.backward(loss)
             self.optimizer.step()
             self.optimizer.zero_grad()
 
-            if self.global_batch_step % self.tau_period == 0:
+            if self.batch_step % self.tau_period == 0:
                 soft_update(self.target_network, self.origin_network, self.tau)
 
     def on_loader_end(self, runner: dl.IRunner):
@@ -317,8 +331,8 @@ if __name__ == "__main__":
     replay_buffer = ReplayBuffer(buffer_size)
 
     network, target_network = get_network(env), get_network(env)
-    utils.set_requires_grad(target_network, requires_grad=False)
-    models = {"origin": network, "target": target_network}
+    set_requires_grad(target_network, requires_grad=False)
+    models = nn.ModuleDict({"origin": network, "target": target_network})
     criterion = torch.nn.MSELoss()
     optimizer = torch.optim.Adam(network.parameters(), lr=lr)
     loaders = {
@@ -329,7 +343,7 @@ if __name__ == "__main__":
 
     runner = CustomRunner(gamma=gamma, tau=tau, tau_period=tau_period)
     runner.train(
-        engine=dl.DeviceEngine("cpu"),  # for simplicity reasons, let's run everything on cpu
+        engine=dl.CPUEngine(),  # for simplicity reasons, let's run everything on cpu
         model=models,
         criterion=criterion,
         optimizer=optimizer,

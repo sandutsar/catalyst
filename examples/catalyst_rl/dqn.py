@@ -4,16 +4,18 @@ import os
 
 from buffer import OffpolicyReplayBuffer
 from db import RedisDB
+import gym
 from misc import GameCallback, soft_update, Trajectory
 import numpy as np
 from sampler import ISampler
 
-import gym
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from catalyst import dl, metrics, utils
+from catalyst import dl, metrics
+from catalyst.contrib.utils.torch import get_optimal_inner_init, outer_init
+from catalyst.utils.torch import set_requires_grad
 
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
@@ -21,7 +23,9 @@ os.environ["MKL_NUM_THREADS"] = "1"
 
 # DQN
 class Sampler(ISampler):
-    def get_action(self, env, actor: nn.Module, state: np.array, epsilon: float = -1) -> int:
+    def get_action(
+        self, env, actor: nn.Module, state: np.array, epsilon: float = -1
+    ) -> int:
         if np.random.random() < epsilon:
             action = env.action_space.sample()
         else:
@@ -65,8 +69,8 @@ class Sampler(ISampler):
 
 
 def get_network(env, num_hidden: int = 128):
-    inner_fn = utils.get_optimal_inner_init(nn.ReLU)
-    outer_fn = utils.outer_init
+    inner_fn = get_optimal_inner_init(nn.ReLU)
+    outer_fn = outer_init
 
     network = torch.nn.Sequential(
         nn.Linear(env.observation_space.shape[0], num_hidden),
@@ -105,15 +109,17 @@ class CustomRunner(dl.Runner):
         self.origin_network: nn.Module = None
         self.target_network: nn.Module = None
 
-    def on_stage_start(self, runner: dl.IRunner):
-        super().on_stage_start(runner)
+    def on_experiment_start(self, runner: dl.IRunner):
+        super().on_experiment_start(runner)
         self.origin_network = self.model[self.origin_key]
         self.target_network = self.model[self.target_key]
         soft_update(self.target_network, self.origin_network, 1.0)
 
     def on_loader_start(self, runner: dl.IRunner):
         super().on_loader_start(runner)
-        self.meters = {key: metrics.AdditiveMetric(compute_on_call=False) for key in ["loss"]}
+        self.meters = {
+            key: metrics.AdditiveMetric(compute_on_call=False) for key in ["loss"]
+        }
 
     def handle_batch(self, batch: Sequence[np.array]):
         # model train/valid step
@@ -151,11 +157,11 @@ class CustomRunner(dl.Runner):
             self.meters[key].update(self.batch_metrics[key].item(), self.batch_size)
 
         if self.is_train_loader:
-            loss.backward()
+            self.engine.backward(loss)
             self.optimizer.step()
             self.optimizer.zero_grad()
 
-            if self.global_batch_step % self.tau_period == 0:
+            if self.batch_step % self.tau_period == 0:
                 soft_update(self.target_network, self.origin_network, self.tau)
 
     def on_loader_end(self, runner: dl.IRunner):
@@ -195,8 +201,8 @@ if __name__ == "__main__":
     )
 
     network, target_network = get_network(env), get_network(env)
-    utils.set_requires_grad(target_network, requires_grad=False)
-    models = {"origin": network, "target": target_network}
+    set_requires_grad(target_network, requires_grad=False)
+    models = nn.ModuleDict({"origin": network, "target": target_network})
     criterion = torch.nn.MSELoss()
     optimizer = torch.optim.Adam(network.parameters(), lr=lr)
     loaders = {"train_game": DataLoader(replay_buffer, batch_size=batch_size)}
@@ -204,7 +210,7 @@ if __name__ == "__main__":
     runner = CustomRunner(gamma=gamma, tau=tau, tau_period=tau_period)
     runner.train(
         # for simplicity reasons, let's run everything on single gpu
-        engine=dl.DeviceEngine("cuda"),
+        engine=dl.GPUEngine(),
         model=models,
         criterion=criterion,
         optimizer=optimizer,

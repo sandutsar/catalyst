@@ -1,15 +1,16 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 import re
 
 import numpy as np
 
 from catalyst.core.logger import ILogger
 from catalyst.settings import SETTINGS
-from catalyst.typing import Directory, File, Union
 
 if SETTINGS.mlflow_required:
     import mlflow
     from mlflow.tracking.fluent import ActiveRun
+if TYPE_CHECKING:
+    from catalyst.core.runner import IRunner
 
 
 def _get_or_start_run(run_name: Optional[str]) -> "ActiveRun":
@@ -64,7 +65,9 @@ def _mlflow_log_params_dict(
             except mlflow.exceptions.MlflowException:
                 continue
         else:
-            raise ValueError(f"Unknown type of logging value: type({value})={type(value)}")
+            raise ValueError(
+                f"Unknown type of logging value: type({value})={type(value)}"
+            )
 
 
 class MLflowLogger(ILogger):
@@ -75,7 +78,8 @@ class MLflowLogger(ILogger):
     Args:
         experiment: Name of the experiment in MLflow to log to.
         run: Name of the run in Mlflow to log to.
-        tracking_uri: URI of tracking server against which to log run information related.
+        tracking_uri: URI of tracking server against which
+            to log run information related.
         registry_uri: Address of local or remote model registry server.
         exclude: Name of  to exclude from logging.
         log_batch_metrics: boolean flag to log batch metrics
@@ -111,28 +115,6 @@ class MLflowLogger(ILogger):
             # ...
 
         runner = CustomRunner().run()
-
-    Config API example:
-
-    .. code-block:: yaml
-
-        loggers:
-            mlflow:
-                _target_: MLflowLogger
-                experiment: test_exp
-                run: test_run
-        ...
-
-    Hydra API example:
-
-    .. code-block:: yaml
-
-        loggers:
-            mlflow:
-                _target_: catalyst.dl.MLflowLogger
-                experiment: test_exp
-                run: test_run
-        ...
     """
 
     def __init__(
@@ -145,161 +127,95 @@ class MLflowLogger(ILogger):
         log_batch_metrics: bool = SETTINGS.log_batch_metrics,
         log_epoch_metrics: bool = SETTINGS.log_epoch_metrics,
     ) -> None:
-        super().__init__(log_batch_metrics=log_batch_metrics, log_epoch_metrics=log_epoch_metrics)
+        super().__init__(
+            log_batch_metrics=log_batch_metrics, log_epoch_metrics=log_epoch_metrics
+        )
         self.experiment = experiment
         self.run = run
         self.tracking_uri = tracking_uri
         self.registry_uri = registry_uri
         self.exclude = exclude
 
-        self._multistage = False
-
         mlflow.set_tracking_uri(self.tracking_uri)
         mlflow.set_registry_uri(self.registry_uri)
         mlflow.set_experiment(self.experiment)
         _get_or_start_run(run_name=self.run)
+
+    @property
+    def logger(self):
+        """Internal logger/experiment/etc. from the monitoring system."""
+        return mlflow
 
     @staticmethod
     def _log_metrics(metrics: Dict[str, float], step: int, loader_key: str, suffix=""):
         for key, value in metrics.items():
             mlflow.log_metric(f"{key}/{loader_key}{suffix}", value, step=step)
 
-    def log_metrics(
+    def log_artifact(
         self,
-        metrics: Dict[str, Any],
+        tag: str,
+        runner: "IRunner",
+        artifact: object = None,
+        path_to_artifact: str = None,
         scope: str = None,
-        # experiment info
-        run_key: str = None,
-        global_epoch_step: int = 0,
-        global_batch_step: int = 0,
-        global_sample_step: int = 0,
-        # stage info
-        stage_key: str = None,
-        stage_epoch_len: int = 0,
-        stage_epoch_step: int = 0,
-        stage_batch_step: int = 0,
-        stage_sample_step: int = 0,
-        # loader info
-        loader_key: str = None,
-        loader_batch_len: int = 0,
-        loader_sample_len: int = 0,
-        loader_batch_step: int = 0,
-        loader_sample_step: int = 0,
     ) -> None:
-        """Logs batch and epoch metrics to MLflow."""
-        if scope == "batch" and self.log_batch_metrics:
-            metrics = {k: float(v) for k, v in metrics.items()}
-            self._log_metrics(
-                metrics=metrics, step=global_batch_step, loader_key=loader_key, suffix="/batch"
-            )
-        elif scope == "epoch" and self.log_epoch_metrics:
-            for loader_key, per_loader_metrics in metrics.items():
-                self._log_metrics(
-                    metrics=per_loader_metrics,
-                    step=global_epoch_step,
-                    loader_key=loader_key,
-                    suffix="/epoch",
-                )
+        """Logs a local file or directory as an artifact to the logger."""
+        mlflow.log_artifact(path_to_artifact)
 
     def log_image(
         self,
         tag: str,
         image: np.ndarray,
+        runner: "IRunner",
         scope: str = None,
-        # experiment info
-        run_key: str = None,
-        global_epoch_step: int = 0,
-        global_batch_step: int = 0,
-        global_sample_step: int = 0,
-        # stage info
-        stage_key: str = None,
-        stage_epoch_len: int = 0,
-        stage_epoch_step: int = 0,
-        stage_batch_step: int = 0,
-        stage_sample_step: int = 0,
-        # loader info
-        loader_key: str = None,
-        loader_batch_len: int = 0,
-        loader_sample_len: int = 0,
-        loader_batch_step: int = 0,
-        loader_sample_step: int = 0,
     ) -> None:
         """Logs image to MLflow for current scope on current step."""
-        mlflow.log_image(image, f"{tag}_scope_{scope}_epoch_{global_epoch_step}.png")
+        if scope == "batch" or scope == "loader":
+            log_path = "_".join(
+                [tag, f"epoch-{runner.epoch_step:04d}", f"loader-{runner.loader_key}"]
+            )
+        elif scope == "epoch":
+            log_path = "_".join([tag, f"epoch-{runner.epoch_step:04d}"])
+        elif scope == "experiment" or scope is None:
+            log_path = tag
+        mlflow.log_image(image, f"{log_path}.png")
 
-    def log_hparams(
-        self,
-        hparams: Dict,
-        scope: str = None,
-        # experiment info
-        run_key: str = None,
-        stage_key: str = None,
-    ) -> None:
+    def log_hparams(self, hparams: Dict, runner: "IRunner" = None) -> None:
         """Logs parameters for current scope.
-
-        If there in experiment more than one stage, creates nested runs.
-
-        Note:
-            If the scope is "experiment", it does nothing, since overwriting parameters
-            in MLflow is prohibited. Thus, first, the parameters of the stage
-            are recorded, and only then the experiment.
 
         Args:
             hparams: Parameters to log.
-            scope: On which scope log parameters.
-            run_key: Experiment info.
-            stage_key: Stage info.
+            runner: experiment runner
         """
-        stages = hparams.get("stages", {})
-        self._multistage = len(stages) > 1
+        _mlflow_log_params_dict(hparams, log_type="param", exclude=self.exclude)
 
-        if scope == "experiment":
-            if not self.run:
-                mlflow.set_tag("mlflow.runName", run_key)
-
-        if scope == "stage":
-            if self._multistage:
-                mlflow.start_run(run_name=stage_key, nested=True)
-
-            stage_params = hparams.get("stages", {}).get(stage_key, {})
-            _mlflow_log_params_dict(stage_params, log_type="param", exclude=self.exclude)
-
-            experiment_params = {key: value for key, value in hparams.items() if key != "stages"}
-            _mlflow_log_params_dict(experiment_params, log_type="param", exclude=self.exclude)
-
-    def log_artifact(
+    def log_metrics(
         self,
-        tag: str,
-        artifact: Union[Directory, File] = None,
-        path_to_artifact: str = None,
-        scope: str = None,
-        # experiment info
-        run_key: str = None,
-        global_epoch_step: int = 0,
-        global_batch_step: int = 0,
-        global_sample_step: int = 0,
-        # stage info
-        stage_key: str = None,
-        stage_epoch_len: int = 0,
-        stage_epoch_step: int = 0,
-        stage_batch_step: int = 0,
-        stage_sample_step: int = 0,
-        # loader info
-        loader_key: str = None,
-        loader_batch_len: int = 0,
-        loader_sample_len: int = 0,
-        loader_batch_step: int = 0,
-        loader_sample_step: int = 0,
+        metrics: Dict[str, float],
+        scope: str,
+        runner: "IRunner",
     ) -> None:
-        """Logs a local file or directory as an artifact to the logger."""
-        mlflow.log_artifact(path_to_artifact)
+        """Logs batch and epoch metrics to MLflow."""
+        if scope == "batch" and self.log_batch_metrics:
+            metrics = {k: float(v) for k, v in metrics.items()}
+            self._log_metrics(
+                metrics=metrics,
+                step=runner.batch_step,
+                loader_key=runner.loader_key,
+                suffix="/batch",
+            )
+        elif scope == "epoch" and self.log_epoch_metrics:
+            for loader_key, per_loader_metrics in metrics.items():
+                self._log_metrics(
+                    metrics=per_loader_metrics,
+                    step=runner.epoch_step,
+                    loader_key=loader_key,
+                    suffix="/epoch",
+                )
 
-    def close_log(self, scope: str = None) -> None:
+    def close_log(self) -> None:
         """End an active MLflow run."""
-        if scope == "stage" and self._multistage:
-            mlflow.end_run()
-        if scope == "experiment":
-            mlflow.end_run()
+        mlflow.end_run()
 
 
 __all__ = ["MLflowLogger"]
